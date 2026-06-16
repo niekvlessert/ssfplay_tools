@@ -5,7 +5,9 @@
 #include <stdint.h>
 
 #if defined(_WIN32)
-# if defined(SSFPLAY_BUILDING)
+# if defined(SSFPLAY_STATIC)
+#  define SSFPLAY_API
+# elif defined(SSFPLAY_BUILDING)
 #  define SSFPLAY_API __declspec(dllexport)
 # else
 #  define SSFPLAY_API __declspec(dllimport)

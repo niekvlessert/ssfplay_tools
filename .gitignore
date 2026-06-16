@@ -78,6 +78,7 @@ compile_commands.json
 !/mednafen/src/VirtualFS.cpp
 !/mednafen/src/PSFLoader.cpp
 !/mednafen/src/SSFLoader.cpp
+!/mednafen/src/win32-common.cpp
 !/mednafen/src/compress/
 /mednafen/src/compress/*
 !/mednafen/src/compress/DecompressFilter.cpp

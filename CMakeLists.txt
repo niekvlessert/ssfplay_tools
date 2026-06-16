@@ -111,6 +111,12 @@ set(SSFPLAY_SOURCES
   ${MEDNAFEN_SRC}/trio/triostr.c
 )
 
+if(WIN32)
+  list(APPEND SSFPLAY_SOURCES
+    ${MEDNAFEN_SRC}/win32-common.cpp
+  )
+endif()
+
 if(SSFPLAY_BUILD_SHARED)
   add_library(ssfplay SHARED ${SSFPLAY_SOURCES})
 else()
@@ -124,6 +130,11 @@ target_compile_definitions(ssfplay PRIVATE
   MDFN_DISABLE_PICPIE_ERRWARN=1
   MDFN_DISABLE_NO_OPT_ERRWARN=1
 )
+if(SSFPLAY_BUILD_SHARED)
+  target_compile_definitions(ssfplay PRIVATE SSFPLAY_BUILDING=1)
+else()
+  target_compile_definitions(ssfplay PUBLIC SSFPLAY_STATIC=1)
+endif()
 target_compile_options(ssfplay PRIVATE
   $<$<COMPILE_LANGUAGE:C>:-fsigned-char;-fwrapv;-fno-fast-math>
   $<$<COMPILE_LANGUAGE:CXX>:-fsigned-char;-fwrapv;-fno-fast-math;-fexceptions>
