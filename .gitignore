@@ -50,6 +50,10 @@ compile_commands.json
 *.tgz
 *.zip
 
+# Local/generated VGM pack directories
+/Bombaman/
+/NiGHTS Into Dreams/
+
 # Local sample/rip data. Do not publish copyrighted music assets.
 /Nights Into Dreams (EMU).zophar/
 /Nights Into Dreams (EMU).zophar.zip

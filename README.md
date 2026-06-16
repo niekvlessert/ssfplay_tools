@@ -77,6 +77,21 @@ The automated all-track smoke test intentionally writes one-second files named
 artifacts, not completed track conversions. Run `ssf2vgm` without
 `--length-ms` to use each SSF's tagged duration.
 
+## Build The NiGHTS Pack
+
+The helper script below creates a vgmrips-style local pack from the supplied
+NiGHTS SSF directory. It converts each `.ssf` to `.vgm`, runs `vgm_cmp`, gzip
+compresses the result to `.vgz`, copies the logo image, and writes a matching
+`.m3u` and `.txt`.
+
+```sh
+scripts/make_nights_vgmrips_pack.py --force --zip
+```
+
+Use `--length-ms 1000 --output /tmp/nights-pack-test` for a quick smoke pack.
+The script auto-detects the newest local `ssf2vgm` binary and `vgm_cmp` from
+`PATH`; both can be overridden with `--ssf2vgm` and `--vgm-cmp`.
+
 ## Embed
 
 ```c

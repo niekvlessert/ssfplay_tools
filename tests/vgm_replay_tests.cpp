@@ -39,6 +39,12 @@ static bool parse_vgm(const char* path, std::vector<uint8_t>& ram,
       if (pos + 2 > data.size()) return false;
       sample += read_u16(&data[pos]);
       pos += 2;
+    } else if (cmd == 0x62) {
+      sample += 735;
+    } else if (cmd == 0x63) {
+      sample += 882;
+    } else if ((cmd & 0xF0) == 0x70) {
+      sample += (cmd & 0x0F) + 1;
     } else if (cmd == 0xC5) {
       if (pos + 3 > data.size()) return false;
       ssfplay_capture_event event = {};

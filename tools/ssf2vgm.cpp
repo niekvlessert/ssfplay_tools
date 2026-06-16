@@ -16,6 +16,11 @@
 
 namespace {
 
+struct Range {
+  uint32_t start = 0;
+  uint32_t end = 0;
+};
+
 struct Report {
   unsigned max_polyphony = 0;
   bool memory_pcm = false;
@@ -33,6 +38,12 @@ struct Report {
   uint32_t ram_write_max = 0;
   uint32_t configured_read_min = 0xFFFFFFFF;
   uint32_t configured_read_max = 0;
+  uint64_t emitted_register_writes = 0;
+  uint64_t emitted_ram_blocks = 0;
+  uint64_t emitted_ram_bytes = 0;
+  uint64_t skipped_register_noops = 0;
+  uint64_t skipped_ram_noops = 0;
+  uint64_t skipped_unread_ram_writes = 0;
 };
 
 static void put_u16(std::vector<uint8_t>& out, uint16_t value) {
@@ -56,6 +67,18 @@ static void set_u32(std::vector<uint8_t>& out, size_t offset, uint32_t value) {
 
 static void emit_wait(std::vector<uint8_t>& out, uint64_t samples) {
   while (samples) {
+    if (samples == 735) {
+      out.push_back(0x62);
+      return;
+    }
+    if (samples == 882) {
+      out.push_back(0x63);
+      return;
+    }
+    if (samples <= 16) {
+      out.push_back(static_cast<uint8_t>(0x70 + samples - 1));
+      return;
+    }
     const uint16_t chunk = static_cast<uint16_t>(std::min<uint64_t>(samples, 65535));
     out.push_back(0x61);
     put_u16(out, chunk);
@@ -121,6 +144,117 @@ static uint16_t shadow_word(const uint8_t* shadow, unsigned address) {
   return static_cast<uint16_t>((shadow[address] << 8) | shadow[address + 1]);
 }
 
+static void add_range(std::vector<Range>& ranges, uint32_t start, uint32_t end) {
+  if (start > end || start >= 0x80000)
+    return;
+  end = std::min<uint32_t>(end, 0x7FFFF);
+  for (Range& range : ranges) {
+    if (end + 1 < range.start || start > range.end + 1)
+      continue;
+    range.start = std::min(range.start, start);
+    range.end = std::max(range.end, end);
+    bool merged = true;
+    while (merged) {
+      merged = false;
+      for (size_t i = 0; i < ranges.size(); ++i) {
+        for (size_t j = i + 1; j < ranges.size(); ++j) {
+          if (ranges[j].end + 1 < ranges[i].start ||
+              ranges[j].start > ranges[i].end + 1)
+            continue;
+          ranges[i].start = std::min(ranges[i].start, ranges[j].start);
+          ranges[i].end = std::max(ranges[i].end, ranges[j].end);
+          ranges.erase(ranges.begin() + j);
+          merged = true;
+          break;
+        }
+        if (merged)
+          break;
+      }
+    }
+    return;
+  }
+  ranges.push_back(Range{start, end});
+}
+
+static bool in_ranges(const std::vector<Range>& ranges, uint32_t address) {
+  for (const Range& range : ranges) {
+    if (address >= range.start && address <= range.end)
+      return true;
+  }
+  return false;
+}
+
+static void collect_sound_ram_ranges_from_shadow(const uint8_t* shadow,
+                                                 std::vector<Range>& ranges,
+                                                 Report& report) {
+  bool any_dsp_routing = false;
+  for (unsigned slot = 0; slot < 32; ++slot) {
+    const unsigned base = slot * 0x20;
+    const uint16_t control = shadow_word(shadow, base);
+    any_dsp_routing |= shadow_word(shadow, base + 0x14) != 0;
+    if ((control & 0x0800) == 0 || ((control >> 7) & 3) != 0)
+      continue;
+
+    const uint32_t start = ((control & 0xF) << 16) |
+                           shadow_word(shadow, base + 0x02);
+    const uint32_t bytes_per_sample = (control & 0x10) ? 1 : 2;
+    const uint32_t loop_end = shadow_word(shadow, base + 0x06);
+    if (!loop_end)
+      continue;
+    const uint32_t end = std::min<uint32_t>(
+        0x7FFFF, start + loop_end * bytes_per_sample + 32);
+    add_range(ranges, start, end);
+    report.configured_read_min = std::min(report.configured_read_min, start);
+    report.configured_read_max = std::max(report.configured_read_max, end);
+  }
+
+  bool any_dsp_program = false;
+  for (unsigned i = 0x700; i < 0xC00; ++i) {
+    any_dsp_program |= shadow[i] != 0;
+  }
+  if (any_dsp_program || any_dsp_routing) {
+    const uint16_t rb = shadow_word(shadow, 0x402);
+    const uint32_t rbp = rb & 0x7F;
+    const uint32_t rbl = (rb >> 7) & 0x3;
+    const uint32_t start = rbp << 12;
+    const uint32_t words = 0x2000U << rbl;
+    add_range(ranges, start * 2, std::min<uint32_t>(0x7FFFF, (start + words) * 2 - 1));
+  }
+}
+
+static std::vector<Range> collect_sound_ram_ranges(
+    const ssfplay_capture_event* events, size_t event_count, Report& report) {
+  std::vector<Range> ranges;
+  uint8_t shadow[0x1000] = {};
+  for (size_t i = 0; i < event_count; ++i) {
+    if (events[i].type != SSFPLAY_CAPTURE_REGISTER_WRITE)
+      continue;
+    shadow[events[i].address & 0xFFF] = events[i].value;
+    collect_sound_ram_ranges_from_shadow(shadow, ranges, report);
+  }
+  return ranges;
+}
+
+static bool register_write_has_side_effect(uint32_t address, uint8_t value) {
+  const uint32_t reg = address & 0xFFF;
+  if (reg < 0x400) {
+    const uint32_t word = reg & ~1U;
+    if ((word & 0x1F) == 0x00 && (reg & 1) == 0 && (value & 0x10))
+      return true;  // KYONEX on slot control high byte.
+    return false;
+  }
+  if (reg >= 0x400 && reg < 0x430) {
+    const uint32_t common = (reg >> 1) & 0x1F;
+    if (common == 0x03 || common == 0x0B || common == 0x0F ||
+        common == 0x10 || common == 0x11 || common == 0x12 ||
+        common == 0x13 || common == 0x14 || common == 0x15 ||
+        common == 0x16 || common == 0x17 || common == 0x18 ||
+        common == 0x19)
+      return true;  // MIDI, DMA execute, interrupt acknowledge/enable/status.
+  }
+  return false;
+}
+
 static void inspect_shadow(const uint8_t* shadow, Report& report) {
   unsigned active = 0;
   for (unsigned slot = 0; slot < 32; ++slot) {
@@ -163,6 +297,8 @@ static void write_report(const std::string& path, const ssfplay_decoder* decoder
       << "  \"title\": \"" << json_escape(ssfplay_metadata(decoder, SSFPLAY_METADATA_TITLE)) << "\",\n"
       << "  \"duration_samples\": " << total_samples << ",\n"
       << "  \"events\": " << event_count << ",\n"
+      << "  \"emitted_events\": "
+      << (report.emitted_register_writes + report.emitted_ram_bytes) << ",\n"
       << "  \"maximum_polyphony\": " << report.max_polyphony << ",\n"
       << "  \"observed\": {\n"
       << "    \"memory_pcm\": " << (report.memory_pcm ? "true" : "false") << ",\n"
@@ -191,9 +327,15 @@ static void write_report(const std::string& path, const ssfplay_decoder* decoder
       << "    \"16_bit_ram_writes_serialized_as_bytes\": " << stats.ram_word_writes << ",\n"
       << "    \"same_sample_event_collisions\": " << stats.same_sample_collisions << ",\n"
       << "    \"register_bytes\": " << stats.register_writes << ",\n"
-      << "    \"ram_bytes\": " << stats.ram_writes << "\n"
+      << "    \"ram_bytes\": " << stats.ram_writes << ",\n"
+      << "    \"emitted_register_writes\": " << report.emitted_register_writes << ",\n"
+      << "    \"emitted_ram_blocks\": " << report.emitted_ram_blocks << ",\n"
+      << "    \"emitted_ram_bytes\": " << report.emitted_ram_bytes << ",\n"
+      << "    \"skipped_register_noops\": " << report.skipped_register_noops << ",\n"
+      << "    \"skipped_ram_noops\": " << report.skipped_ram_noops << ",\n"
+      << "    \"skipped_unread_ram_writes\": " << report.skipped_unread_ram_writes << "\n"
       << "  },\n"
-      << "  \"mednafen_replay_comparison\": {\"different_samples\": "
+      << "  \"compact_vgm_replay_comparison\": {\"different_samples\": "
       << waveform_differences << ", \"maximum_pcm_delta\": " << maximum_delta
       << "},\n"
       << "  \"ram_written_range\": ";
@@ -209,8 +351,15 @@ static void write_report(const std::string& path, const ssfplay_decoder* decoder
     out << "{\"start\": " << report.configured_read_min << ", \"end\": "
         << report.configured_read_max << "},\n";
   out << "  \"warnings\": [";
-  if (stats.register_word_writes)
+  bool wrote_warning = false;
+  if (stats.register_word_writes) {
     out << "\"Atomic 16-bit SCSP writes are represented as two ordered byte writes.\"";
+    wrote_warning = true;
+  }
+  if (report.skipped_unread_ram_writes) {
+    out << (wrote_warning ? ", " : "")
+        << "\"Runtime RAM writes outside observed SCSP sample/DSP read ranges were omitted from compact VGM output.\"";
+  }
   out << "],\n"
       << "  \"reachability_note\": \"Only behavior executed during this playback is reported; dormant or absent game sounds are not inferred.\",\n"
       << "  \"unreachable_classes\": [\"content absent from the SSF/SSFLIB rip\", \"disc-loaded assets\", \"sounds requiring SH-2 or gameplay triggers\", \"CD-DA or external SCSP input\", \"dormant sounds with unknown trigger protocol\"]\n"
@@ -220,7 +369,9 @@ static void write_report(const std::string& path, const ssfplay_decoder* decoder
 static bool write_vgm(const std::string& path, const ssfplay_decoder* decoder,
                       const uint8_t* ram, size_t ram_size,
                       const ssfplay_capture_event* events, size_t event_count,
-                      uint64_t total_samples, Report& report) {
+                      uint64_t total_samples, bool all_ram_writes,
+                      Report& report,
+                      std::vector<ssfplay_capture_event>* emitted_events) {
   if (total_samples > 0xFFFFFFFFULL) return false;
   std::vector<uint8_t> out(0x100, 0);
   std::memcpy(out.data(), "Vgm ", 4);
@@ -236,14 +387,32 @@ static bool write_vgm(const std::string& path, const ssfplay_decoder* decoder,
   put_u32(out, 0);
   out.insert(out.end(), ram, ram + ram_size);
 
+  const std::vector<Range> sound_ram_ranges =
+      all_ram_writes ? std::vector<Range>()
+                     : collect_sound_ram_ranges(events, event_count, report);
+
   uint8_t shadow[0x1000] = {};
   std::vector<uint8_t> ram_shadow(ram, ram + ram_size);
   uint64_t position = 0;
   for (size_t i = 0; i < event_count;) {
     if (events[i].sample > total_samples) break;
     if (events[i].type == SSFPLAY_CAPTURE_RAM_WRITE &&
+        (!all_ram_writes && !in_ranges(sound_ram_ranges, events[i].address))) {
+      report.skipped_unread_ram_writes++;
+      ++i;
+      continue;
+    }
+    if (events[i].type == SSFPLAY_CAPTURE_RAM_WRITE &&
         events[i].address < ram_shadow.size() &&
         ram_shadow[events[i].address] == events[i].value) {
+      report.skipped_ram_noops++;
+      ++i;
+      continue;
+    }
+    if (events[i].type == SSFPLAY_CAPTURE_REGISTER_WRITE &&
+        shadow[events[i].address & 0xFFF] == events[i].value &&
+        !register_write_has_side_effect(events[i].address, events[i].value)) {
+      report.skipped_register_noops++;
       ++i;
       continue;
     }
@@ -256,6 +425,7 @@ static bool write_vgm(const std::string& path, const ssfplay_decoder* decoder,
       while (end < event_count && events[end].sample == sample &&
              events[end].type == SSFPLAY_CAPTURE_RAM_WRITE &&
              events[end].address == events[end - 1].address + 1 &&
+             (all_ram_writes || in_ranges(sound_ram_ranges, events[end].address)) &&
              events[end].address < ram_shadow.size() &&
              ram_shadow[events[end].address] != events[end].value)
         ++end;
@@ -268,7 +438,11 @@ static bool write_vgm(const std::string& path, const ssfplay_decoder* decoder,
         out.push_back(events[j].value);
         if (events[j].address < ram_shadow.size())
           ram_shadow[events[j].address] = events[j].value;
+        if (emitted_events)
+          emitted_events->push_back(events[j]);
       }
+      report.emitted_ram_blocks++;
+      report.emitted_ram_bytes += end - i;
       report.ram_write_min = std::min(report.ram_write_min, start);
       report.ram_write_max = std::max(report.ram_write_max,
                                       events[end - 1].address);
@@ -279,6 +453,9 @@ static bool write_vgm(const std::string& path, const ssfplay_decoder* decoder,
       out.push_back(static_cast<uint8_t>(events[i].address));
       out.push_back(events[i].value);
       shadow[events[i].address & 0xFFF] = events[i].value;
+      report.emitted_register_writes++;
+      if (emitted_events)
+        emitted_events->push_back(events[i]);
       if (events[i].address >= 0x700 && events[i].address < 0xC00)
         report.dsp_program = true;
       inspect_shadow(shadow, report);
@@ -333,7 +510,7 @@ static bool write_vgm(const std::string& path, const ssfplay_decoder* decoder,
 }
 
 static void usage(const char* argv0) {
-  std::fprintf(stderr, "Usage: %s [--length-ms N] [--report report.json] input.ssf output.vgm|output.vgz\n", argv0);
+  std::fprintf(stderr, "Usage: %s [--length-ms N] [--report report.json] [--all-ram-writes] input.ssf output.vgm|output.vgz\n", argv0);
 }
 
 }  // namespace
@@ -341,12 +518,15 @@ static void usage(const char* argv0) {
 int main(int argc, char** argv) {
   int64_t length_override = -1;
   std::string report_path;
+  bool all_ram_writes = false;
   std::vector<const char*> positional;
   for (int i = 1; i < argc; ++i) {
     if (!std::strcmp(argv[i], "--length-ms") && i + 1 < argc) {
       length_override = std::strtoll(argv[++i], nullptr, 10);
     } else if (!std::strcmp(argv[i], "--report") && i + 1 < argc) {
       report_path = argv[++i];
+    } else if (!std::strcmp(argv[i], "--all-ram-writes")) {
+      all_ram_writes = true;
     } else {
       positional.push_back(argv[i]);
     }
@@ -407,8 +587,9 @@ int main(int argc, char** argv) {
   const uint64_t total_samples =
       static_cast<uint64_t>(ssfplay_length_ms(decoder)) * 44100 / 1000;
   Report report;
+  std::vector<ssfplay_capture_event> emitted_events;
   if (!write_vgm(positional[1], decoder, ram, ram_size, events, event_count,
-                 total_samples, report)) {
+                 total_samples, all_ram_writes, report, &emitted_events)) {
     std::fprintf(stderr, "ssf2vgm: could not write VGM (or duration exceeds VGM limit)\n");
     ssfplay_close(decoder);
     return 1;
@@ -417,7 +598,10 @@ int main(int argc, char** argv) {
     std::vector<int16_t> replay_pcm(static_cast<size_t>(total_samples) * 2);
     uint64_t differences = 0;
     unsigned maximum_delta = 0;
-    if (ssfplay_capture_replay(ram, ram_size, events, event_count, total_samples,
+    const ssfplay_capture_event* replay_events =
+        emitted_events.empty() ? nullptr : emitted_events.data();
+    if (ssfplay_capture_replay(ram, ram_size, replay_events,
+                               emitted_events.size(), total_samples,
                                replay_pcm.data()) == SSFPLAY_OK) {
       const size_t count = std::min(direct_pcm.size(), replay_pcm.size());
       for (size_t i = 0; i < count; ++i) {
@@ -436,9 +620,9 @@ int main(int argc, char** argv) {
                  differences, maximum_delta);
   }
 
-  std::printf("wrote %s: %llu samples, %zu events, %llu atomic word-write warnings\n",
+  std::printf("wrote %s: %llu samples, %zu raw events, %zu emitted events, %llu atomic word-write warnings\n",
               positional[1], static_cast<unsigned long long>(total_samples),
-              event_count,
+              event_count, emitted_events.size(),
               static_cast<unsigned long long>(stats.register_word_writes));
   ssfplay_close(decoder);
   return 0;
