@@ -93,6 +93,26 @@ static int test_failures(const char* music_dir) {
 }
 
 int main(int argc, char** argv) {
+  if (argc == 1) {
+    ssfplay_config config;
+    ssfplay_config_init(&config);
+    if (config.sample_rate != 44100 || config.resampler_quality != 10 ||
+        config.length_ms != -1 || config.fade_ms != -1) {
+      fprintf(stderr, "default config mismatch\n");
+      return 1;
+    }
+    ssfplay_decoder* d = 0;
+    if (ssfplay_open("/definitely/not/an/ssf", 0, &d) != SSFPLAY_ERROR_IO) {
+      fprintf(stderr, "missing file did not fail as expected\n");
+      return 1;
+    }
+    if (!ssfplay_last_error()[0]) {
+      fprintf(stderr, "missing file did not set last error\n");
+      return 1;
+    }
+    printf("fixture-free API smoke test passed\n");
+    return 0;
+  }
   if (argc != 2) return 2;
   if (test_failures(argv[1])) return 1;
   DIR* dir = opendir(argv[1]);

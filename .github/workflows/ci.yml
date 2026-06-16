@@ -72,8 +72,8 @@ jobs:
           -DSSFPLAY_BUILD_CLI=ON
           -DSSFPLAY_BUILD_PLAYER=ON
 
-      - name: Build tools
-        run: cmake --build build --config Release --target ssfplay_all_tools
+      - name: Build
+        run: cmake --build build --config Release
 
       - name: Test
         run: ctest --test-dir build -C Release --output-on-failure
@@ -99,12 +99,16 @@ jobs:
   wasm:
     name: wasm
     runs-on: ubuntu-24.04
+    env:
+      EM_CACHE: ${{ runner.temp }}/emscripten-cache
     steps:
       - uses: actions/checkout@v4
       - uses: mymindstorm/setup-emsdk@v14
+      - name: Prepare Emscripten cache
+        run: mkdir -p "$EM_CACHE"
       - name: Configure WASM
         run: >
-          emcmake cmake -S . -B build-wasm -G Ninja
+          emcmake cmake -S . -B build-wasm
           -DCMAKE_BUILD_TYPE=Release
           -DSSFPLAY_BUILD_SHARED=OFF
           -DSSFPLAY_BUILD_CLI=OFF
