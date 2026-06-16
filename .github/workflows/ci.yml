@@ -16,24 +16,24 @@ jobs:
         include:
           - name: windows-x64
             os: windows-2022
-            generator: "Visual Studio 17 2022"
-            arch: x64
             triplet: x64-windows-static
             package_ext: zip
+            msvc_arch: x64
+            clang_target: x86_64-pc-windows-msvc
 
           - name: windows-x86
             os: windows-2022
-            generator: "Visual Studio 17 2022"
-            arch: Win32
             triplet: x86-windows-static
             package_ext: zip
+            msvc_arch: x86
+            clang_target: i686-pc-windows-msvc
 
           - name: windows-arm64
             os: windows-2022
-            generator: "Visual Studio 17 2022"
-            arch: ARM64
             triplet: arm64-windows-static
             package_ext: zip
+            msvc_arch: amd64_arm64
+            clang_target: arm64-pc-windows-msvc
 
           - name: linux-x64
             os: ubuntu-24.04
@@ -54,6 +54,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Setup MSVC environment
+        if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: ${{ matrix.msvc_arch }}
+
       - name: Install Linux dependencies
         if: runner.os == 'Linux'
         run: |
@@ -69,9 +75,11 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: >
-          cmake -S . -B build
-          -G "${{ matrix.generator }}"
-          -A "${{ matrix.arch }}"
+          cmake -S . -B build -G Ninja
+          -DCMAKE_C_COMPILER=clang-cl
+          -DCMAKE_CXX_COMPILER=clang-cl
+          -DCMAKE_C_COMPILER_TARGET=${{ matrix.clang_target }}
+          -DCMAKE_CXX_COMPILER_TARGET=${{ matrix.clang_target }}
           -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake"
           -DVCPKG_TARGET_TRIPLET=${{ matrix.triplet }}
           -DCMAKE_BUILD_TYPE=Release
