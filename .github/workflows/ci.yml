@@ -6,7 +6,72 @@ on:
   workflow_dispatch:
 
 jobs:
-  native:
+  windows:
+    name: ${{ matrix.name }}
+    runs-on: windows-2022
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: windows-x64
+            msystem: MINGW64
+            package_prefix: mingw-w64-x86_64
+            package_ext: zip
+
+          - name: windows-x86
+            msystem: MINGW32
+            package_prefix: mingw-w64-i686
+            package_ext: zip
+
+    defaults:
+      run:
+        shell: msys2 {0}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup MSYS2
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: ${{ matrix.msystem }}
+          update: true
+          install: >-
+            git
+            base-devel
+            ${{ matrix.package_prefix }}-gcc
+            ${{ matrix.package_prefix }}-cmake
+            ${{ matrix.package_prefix }}-ninja
+            ${{ matrix.package_prefix }}-zlib
+
+      - name: Configure Windows
+        run: >
+          cmake -S . -B build -G Ninja
+          -DCMAKE_BUILD_TYPE=Release
+          -DSSFPLAY_BUILD_SHARED=OFF
+          -DSSFPLAY_BUILD_CLI=ON
+          -DSSFPLAY_BUILD_PLAYER=ON
+
+      - name: Build
+        run: cmake --build build
+
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
+
+      - name: Install package staging
+        run: cmake --install build --prefix package/ssfplay-tools --component tools
+
+      - name: Package Windows
+        shell: pwsh
+        run: |
+          Compress-Archive -Path package/ssfplay-tools -DestinationPath ssfplay-tools-${{ matrix.name }}.zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ssfplay-tools-${{ matrix.name }}
+          path: ssfplay-tools-${{ matrix.name }}.zip
+
+  native-unix:
     name: ${{ matrix.name }}
     runs-on: ${{ matrix.os }}
 
@@ -14,27 +79,6 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - name: windows-x64
-            os: windows-2022
-            triplet: x64-windows-static
-            package_ext: zip
-            msvc_arch: x64
-            clang_target: x86_64-pc-windows-msvc
-
-          - name: windows-x86
-            os: windows-2022
-            triplet: x86-windows-static
-            package_ext: zip
-            msvc_arch: x86
-            clang_target: i686-pc-windows-msvc
-
-          - name: windows-arm64
-            os: windows-2022
-            triplet: arm64-windows-static
-            package_ext: zip
-            msvc_arch: amd64_arm64
-            clang_target: arm64-pc-windows-msvc
-
           - name: linux-x64
             os: ubuntu-24.04
             package_ext: tar.gz
@@ -44,7 +88,7 @@ jobs:
             package_ext: tar.gz
 
           - name: macos-intel
-            os: macos-13
+            os: macos-15-intel
             package_ext: tar.gz
 
           - name: macos-apple-silicon
@@ -53,12 +97,6 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
-
-      - name: Setup MSVC environment
-        if: runner.os == 'Windows'
-        uses: ilammy/msvc-dev-cmd@v1
-        with:
-          arch: ${{ matrix.msvc_arch }}
 
       - name: Install Linux dependencies
         if: runner.os == 'Linux'
@@ -71,24 +109,7 @@ jobs:
         run: |
           brew install ninja zlib
 
-      - name: Configure Windows
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: >
-          cmake -S . -B build -G Ninja
-          -DCMAKE_C_COMPILER=clang-cl
-          -DCMAKE_CXX_COMPILER=clang-cl
-          -DCMAKE_C_COMPILER_TARGET=${{ matrix.clang_target }}
-          -DCMAKE_CXX_COMPILER_TARGET=${{ matrix.clang_target }}
-          -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake"
-          -DVCPKG_TARGET_TRIPLET=${{ matrix.triplet }}
-          -DCMAKE_BUILD_TYPE=Release
-          -DSSFPLAY_BUILD_SHARED=OFF
-          -DSSFPLAY_BUILD_CLI=ON
-          -DSSFPLAY_BUILD_PLAYER=ON
-
       - name: Configure Unix
-        if: runner.os != 'Windows'
         run: >
           cmake -S . -B build -G Ninja
           -DCMAKE_BUILD_TYPE=Release
@@ -97,24 +118,17 @@ jobs:
           -DSSFPLAY_BUILD_PLAYER=ON
 
       - name: Build
-        run: cmake --build build --config Release
+        run: cmake --build build
 
       - name: Test
-        run: ctest --test-dir build -C Release --output-on-failure
+        run: ctest --test-dir build --output-on-failure
 
       - name: Install package staging
-        run: cmake --install build --config Release --prefix package/ssfplay-tools --component tools
+        run: cmake --install build --prefix package/ssfplay-tools --component tools
 
       - name: Package Unix
-        if: runner.os != 'Windows'
         run: |
           tar -czf ssfplay-tools-${{ matrix.name }}.tar.gz -C package ssfplay-tools
-
-      - name: Package Windows
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          Compress-Archive -Path package/ssfplay-tools -DestinationPath ssfplay-tools-${{ matrix.name }}.zip
 
       - uses: actions/upload-artifact@v4
         with:
