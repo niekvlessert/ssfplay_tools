@@ -99,13 +99,17 @@ jobs:
   wasm:
     name: wasm
     runs-on: ubuntu-24.04
-    env:
-      EM_CACHE: ${{ runner.temp }}/emscripten-cache
+
     steps:
       - uses: actions/checkout@v4
+
       - uses: mymindstorm/setup-emsdk@v14
+
       - name: Prepare Emscripten cache
-        run: mkdir -p "$EM_CACHE"
+        run: |
+          echo "EM_CACHE=${RUNNER_TEMP}/emscripten-cache" >> "$GITHUB_ENV"
+          mkdir -p "${RUNNER_TEMP}/emscripten-cache"
+
       - name: Configure WASM
         run: >
           emcmake cmake -S . -B build-wasm
@@ -113,13 +117,16 @@ jobs:
           -DSSFPLAY_BUILD_SHARED=OFF
           -DSSFPLAY_BUILD_CLI=OFF
           -DSSFPLAY_BUILD_WASM=ON
+
       - name: Build WASM
         run: cmake --build build-wasm --target ssfplay_wasm
+
       - name: Package WASM
         run: |
           mkdir -p package/ssfplay-wasm
           cp build-wasm/ssfplay.js build-wasm/ssfplay.wasm package/ssfplay-wasm/
           tar -czf ssfplay-wasm.tar.gz -C package ssfplay-wasm
+
       - uses: actions/upload-artifact@v4
         with:
           name: ssfplay-wasm
