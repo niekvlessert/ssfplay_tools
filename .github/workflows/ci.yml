@@ -100,7 +100,7 @@ jobs:
     name: wasm
     runs-on: ubuntu-24.04
     env:
-      EM_CACHE: ${{ runner.temp }}/emscripten-cache
+      EM_CACHE: ${{ env.RUNNER_TEMP }}/emscripten-cache
     steps:
       - uses: actions/checkout@v4
       - uses: mymindstorm/setup-emsdk@v14
