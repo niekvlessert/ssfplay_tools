@@ -9,36 +9,46 @@ jobs:
   native:
     name: ${{ matrix.name }}
     runs-on: ${{ matrix.os }}
+
     strategy:
       fail-fast: false
       matrix:
         include:
           - name: windows-x64
-            os: windows-latest
+            os: windows-2022
             generator: "Visual Studio 17 2022"
             arch: x64
             triplet: x64-windows-static
             package_ext: zip
+
           - name: windows-x86
-            os: windows-latest
+            os: windows-2022
             generator: "Visual Studio 17 2022"
             arch: Win32
             triplet: x86-windows-static
             package_ext: zip
+
           - name: windows-arm64
-            os: windows-latest
+            os: windows-2022
             generator: "Visual Studio 17 2022"
             arch: ARM64
             triplet: arm64-windows-static
             package_ext: zip
+
           - name: linux-x64
             os: ubuntu-24.04
             package_ext: tar.gz
+
           - name: linux-arm64
             os: ubuntu-24.04-arm
             package_ext: tar.gz
+
           - name: macos-intel
             os: macos-13
+            package_ext: tar.gz
+
+          - name: macos-apple-silicon
+            os: macos-14
             package_ext: tar.gz
 
     steps:
@@ -50,8 +60,14 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y ninja-build zlib1g-dev libasound2-dev
 
+      - name: Install macOS dependencies
+        if: runner.os == 'macOS'
+        run: |
+          brew install ninja zlib
+
       - name: Configure Windows
         if: runner.os == 'Windows'
+        shell: pwsh
         run: >
           cmake -S . -B build
           -G "${{ matrix.generator }}"
@@ -89,7 +105,8 @@ jobs:
       - name: Package Windows
         if: runner.os == 'Windows'
         shell: pwsh
-        run: Compress-Archive -Path package/ssfplay-tools -DestinationPath ssfplay-tools-${{ matrix.name }}.zip
+        run: |
+          Compress-Archive -Path package/ssfplay-tools -DestinationPath ssfplay-tools-${{ matrix.name }}.zip
 
       - uses: actions/upload-artifact@v4
         with:
