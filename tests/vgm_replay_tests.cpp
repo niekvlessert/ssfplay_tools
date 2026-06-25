@@ -32,6 +32,8 @@ static bool parse_vgm(const char* path, std::vector<uint8_t>& ram,
   size_t pos = 0x34 + read_u32(&data[0x34]);
   uint64_t sample = 0;
   bool have_initial_ram = false;
+  bool initial_phase = true;
+  ram.assign(0x80000, 0);
   while (pos < data.size()) {
     const uint8_t cmd = data[pos++];
     if (cmd == 0x66) break;
@@ -46,6 +48,7 @@ static bool parse_vgm(const char* path, std::vector<uint8_t>& ram,
     } else if ((cmd & 0xF0) == 0x70) {
       sample += (cmd & 0x0F) + 1;
     } else if (cmd == 0xC5) {
+      initial_phase = false;
       if (pos + 3 > data.size()) return false;
       ssfplay_capture_event event = {};
       event.sample = sample;
@@ -63,10 +66,13 @@ static bool parse_vgm(const char* path, std::vector<uint8_t>& ram,
       const uint32_t address = read_u32(&data[pos]);
       pos += 4;
       const uint32_t bytes = size - 4;
-      if (!have_initial_ram && sample == 0 && address == 0 && bytes == 0x80000) {
-        ram.assign(data.begin() + pos, data.begin() + pos + bytes);
+      if (initial_phase && sample == 0 && address < ram.size() &&
+          bytes <= ram.size() - address) {
+        std::copy(data.begin() + pos, data.begin() + pos + bytes,
+                  ram.begin() + address);
         have_initial_ram = true;
       } else {
+        initial_phase = false;
         for (uint32_t i = 0; i < bytes; ++i) {
           ssfplay_capture_event event = {};
           event.sample = sample;

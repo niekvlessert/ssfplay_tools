@@ -15,6 +15,7 @@ option(SSFPLAY_BUILD_PLAYER "Build ssfplay_cli playback tool" ON)
 option(SSFPLAY_TOOLS_STATIC_RUNTIME "Use the static MSVC runtime for command-line tools" ON)
 option(SSFPLAY_BUILD_WASM "Build the Emscripten/WASM wrapper" OFF)
 option(SSFPLAY_BUILD_FOOBAR2000 "Build the foobar2000 component when an SDK is available" OFF)
+option(SSFPLAY_BUILD_LIBVGM_AB_PLAYER "Build old/new libvgm A/B slot comparison player" ON)
 set(FB2K_SDK_DIR "" CACHE PATH "Path to the foobar2000 SDK")
 
 if(EMSCRIPTEN)
@@ -188,6 +189,208 @@ if(SSFPLAY_BUILD_CLI)
   target_link_libraries(ssf2vgm PRIVATE ZLIB::ZLIB)
   list(APPEND SSFPLAY_TOOL_TARGETS ssf2vgm)
 
+  add_executable(ssf_sample_dump tools/ssf_sample_dump.cpp)
+  target_compile_features(ssf_sample_dump PRIVATE cxx_std_11)
+  ssfplay_configure_tool(ssf_sample_dump)
+  list(APPEND SSFPLAY_TOOL_TARGETS ssf_sample_dump)
+
+  add_executable(scsp_dsp_trace tools/scsp_dsp_trace.cpp)
+  target_compile_features(scsp_dsp_trace PRIVATE cxx_std_11)
+  ssfplay_configure_tool(scsp_dsp_trace)
+  target_link_libraries(scsp_dsp_trace PRIVATE ZLIB::ZLIB)
+  list(APPEND SSFPLAY_TOOL_TARGETS scsp_dsp_trace)
+
+  add_executable(mednafen_scsp_slot_dump tools/mednafen_scsp_slot_dump.cpp)
+  target_compile_features(mednafen_scsp_slot_dump PRIVATE cxx_std_17)
+  ssfplay_configure_tool(mednafen_scsp_slot_dump)
+  target_link_libraries(mednafen_scsp_slot_dump PRIVATE ZLIB::ZLIB)
+  list(APPEND SSFPLAY_TOOL_TARGETS mednafen_scsp_slot_dump)
+
+  add_executable(compare_slot_wavs tools/compare_slot_wavs.cpp)
+  target_compile_features(compare_slot_wavs PRIVATE cxx_std_17)
+  list(APPEND SSFPLAY_TOOL_TARGETS compare_slot_wavs)
+
+  add_executable(scsp_slot_trace_summary tools/scsp_slot_trace_summary.cpp)
+  target_compile_features(scsp_slot_trace_summary PRIVATE cxx_std_11)
+  list(APPEND SSFPLAY_TOOL_TARGETS scsp_slot_trace_summary)
+
+  if(SSFPLAY_BUILD_LIBVGM_AB_PLAYER AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/libvgm/CMakeLists.txt")
+    set(BUILD_LIBAUDIO OFF CACHE BOOL "" FORCE)
+    set(BUILD_LIBEMU ON CACHE BOOL "" FORCE)
+    set(BUILD_LIBPLAYER ON CACHE BOOL "" FORCE)
+    set(BUILD_TESTS OFF CACHE BOOL "" FORCE)
+    set(BUILD_PLAYER OFF CACHE BOOL "" FORCE)
+    set(BUILD_VGM2WAV OFF CACHE BOOL "" FORCE)
+    set(USE_SANITIZERS OFF CACHE BOOL "" FORCE)
+    add_subdirectory(libvgm "${CMAKE_CURRENT_BINARY_DIR}/libvgm-current" EXCLUDE_FROM_ALL)
+
+    add_executable(libvgm_ab_worker_new tools/libvgm_ab_worker.cpp)
+    target_compile_features(libvgm_ab_worker_new PRIVATE cxx_std_11)
+    target_include_directories(libvgm_ab_worker_new PRIVATE
+      "${CMAKE_CURRENT_SOURCE_DIR}/tools"
+      "${CMAKE_CURRENT_SOURCE_DIR}/libvgm")
+    target_link_libraries(libvgm_ab_worker_new PRIVATE vgm-player vgm-emu vgm-utils)
+
+    set(LIBVGM_AB_OLD_SRC "${CMAKE_CURRENT_BINARY_DIR}/libvgm-old-src")
+    set(LIBVGM_AB_OLD_BUILD "${CMAKE_CURRENT_BINARY_DIR}/libvgm-old-build")
+    set(LIBVGM_AB_OLD_TAR "${CMAKE_CURRENT_BINARY_DIR}/libvgm-old.tar")
+    set(LIBVGM_AB_OLD_WORKER_PATH "${LIBVGM_AB_OLD_BUILD}/bin/libvgm_ab_worker_old${CMAKE_EXECUTABLE_SUFFIX}")
+    if(NOT EXISTS "${LIBVGM_AB_OLD_SRC}/CMakeLists.txt")
+      file(MAKE_DIRECTORY "${LIBVGM_AB_OLD_SRC}")
+      execute_process(
+        COMMAND git -C "${CMAKE_CURRENT_SOURCE_DIR}/libvgm" archive --format=tar "--output=${LIBVGM_AB_OLD_TAR}" HEAD
+        RESULT_VARIABLE LIBVGM_AB_ARCHIVE_RESULT)
+      if(NOT LIBVGM_AB_ARCHIVE_RESULT EQUAL 0)
+        message(FATAL_ERROR "Could not archive old libvgm HEAD")
+      endif()
+      execute_process(
+        COMMAND "${CMAKE_COMMAND}" -E tar xf "${LIBVGM_AB_OLD_TAR}"
+        WORKING_DIRECTORY "${LIBVGM_AB_OLD_SRC}"
+        RESULT_VARIABLE LIBVGM_AB_EXTRACT_RESULT)
+      if(NOT LIBVGM_AB_EXTRACT_RESULT EQUAL 0)
+        message(FATAL_ERROR "Could not extract old libvgm HEAD")
+      endif()
+
+      file(READ "${LIBVGM_AB_OLD_SRC}/emu/cores/scsp.c" LIBVGM_AB_OLD_SCSP)
+      string(REPLACE
+        "static UINT8 BypassDSP = 0x01;"
+        "static UINT8 BypassDSP = 0x01;\n\
+typedef void (*SCSP_SLOT_SAMPLE_CALLBACK)(void* opaque, UINT32 slot, INT32 sample);\n\
+static SCSP_SLOT_SAMPLE_CALLBACK SlotSampleCallback = NULL;\n\
+static void* SlotSampleCallbackOpaque = NULL;\n\
+typedef void (*SCSP_SLOT_KEYON_CALLBACK)(void* opaque, UINT32 slot, UINT32 sample_address, UINT32 pitch);\n\
+static SCSP_SLOT_KEYON_CALLBACK SlotKeyOnCallback = NULL;\n\
+static void* SlotKeyOnCallbackOpaque = NULL;\n\
+static UINT32 DebugOutputMuteMask = 0;\n\
+\n\
+void libvgm_scsp_set_slot_sample_callback(SCSP_SLOT_SAMPLE_CALLBACK callback, void* opaque)\n\
+{\n\
+\tSlotSampleCallback = callback;\n\
+\tSlotSampleCallbackOpaque = opaque;\n\
+}\n\
+\n\
+void libvgm_scsp_set_slot_keyon_callback(SCSP_SLOT_KEYON_CALLBACK callback, void* opaque)\n\
+{\n\
+\tSlotKeyOnCallback = callback;\n\
+\tSlotKeyOnCallbackOpaque = opaque;\n\
+}\n\
+\n\
+void libvgm_scsp_set_debug_output_mute_mask(UINT32 mute_mask)\n\
+{\n\
+\tDebugOutputMuteMask = mute_mask;\n\
+}"
+        LIBVGM_AB_OLD_SCSP "${LIBVGM_AB_OLD_SCSP}")
+      string(REPLACE
+        "Compute_LFO(slot);\n\n//\tprintf(\"StartSlot[%p]: SA %x PCM8B %x LPCTL %x ALFOS %x STWINH %x TL %x EFSDL %x\\n\", slot, SA(slot), PCM8B(slot), LPCTL(slot), ALFOS(slot), STWINH(slot), TL(slot), EFSDL(slot));"
+        "Compute_LFO(slot);\n\tif(SlotKeyOnCallback != NULL)\n\t\tSlotKeyOnCallback(SlotKeyOnCallbackOpaque, (UINT32)slot->slot, SA(slot), (UINT32)(((OCT(slot) & 0xF) << 10) | FNS(slot)));\n\n//\tprintf(\"StartSlot[%p]: SA %x PCM8B %x LPCTL %x ALFOS %x STWINH %x TL %x EFSDL %x\\n\", slot, SA(slot), PCM8B(slot), LPCTL(slot), ALFOS(slot), STWINH(slot), TL(slot), EFSDL(slot));"
+        LIBVGM_AB_OLD_SCSP "${LIBVGM_AB_OLD_SCSP}")
+      string(REPLACE
+        "for(sl=0;sl<32;++sl)\n\t\t{"
+        "for(sl=0;sl<32;++sl)\n\t\t{\n\t\t\tsigned int callbackSample = 0;"
+        LIBVGM_AB_OLD_SCSP "${LIBVGM_AB_OLD_SCSP}")
+      string(REPLACE
+        "signed int sample;"
+        "signed int sample;\n\t\t\t\tsigned int slotLeft;\n\t\t\t\tsigned int slotRight;\n\t\t\t\tUINT8 debugOutputMuted;"
+        LIBVGM_AB_OLD_SCSP "${LIBVGM_AB_OLD_SCSP}")
+      string(REPLACE
+        "sample=SCSP_UpdateSlot(scsp, slot);"
+        "sample=SCSP_UpdateSlot(scsp, slot);\n\t\t\t\tdebugOutputMuted = (DebugOutputMuteMask >> sl) & 1;"
+        LIBVGM_AB_OLD_SCSP "${LIBVGM_AB_OLD_SCSP}")
+      string(REPLACE
+        "if (! BypassDSP)\n\t\t\t\t{"
+        "if (!debugOutputMuted && ! BypassDSP)\n\t\t\t\t{"
+        LIBVGM_AB_OLD_SCSP "${LIBVGM_AB_OLD_SCSP}")
+      string(REPLACE
+        "if (! BypassDSP)\n\t\t{"
+        "if (! BypassDSP && DebugOutputMuteMask == 0)\n\t\t{"
+        LIBVGM_AB_OLD_SCSP "${LIBVGM_AB_OLD_SCSP}")
+      string(REPLACE
+        "BypassDSP = (Flags & 0x01) >> 0;\n\t\n\treturn;"
+        "BypassDSP = (Flags & 0x01) >> 0;\n\tif (getenv(\"LIBVGM_SCSP_FORCE_DSP\") != NULL)\n\t\tBypassDSP = 0x00;\n\t\n\treturn;"
+        LIBVGM_AB_OLD_SCSP "${LIBVGM_AB_OLD_SCSP}")
+      string(REPLACE
+        "SCSP_Init(scsp, cfg->clock);\n\n\tscsp_set_mute_mask(scsp, 0x00000000);"
+        "SCSP_Init(scsp, cfg->clock);\n\tif (getenv(\"LIBVGM_SCSP_FORCE_DSP\") != NULL)\n\t\tBypassDSP = 0x00;\n\n\tscsp_set_mute_mask(scsp, 0x00000000);"
+        LIBVGM_AB_OLD_SCSP "${LIBVGM_AB_OLD_SCSP}")
+      string(REPLACE
+        "smpl+=(sample*scsp->LPANTABLE[Enc])>>SHIFT;\n\t\t\t\t\tsmpr+=(sample*scsp->RPANTABLE[Enc])>>SHIFT;"
+        "slotLeft=(sample*scsp->LPANTABLE[Enc])>>SHIFT;\n\t\t\t\t\tslotRight=(sample*scsp->RPANTABLE[Enc])>>SHIFT;\n\t\t\t\t\tsmpl+=slotLeft;\n\t\t\t\t\tsmpr+=slotRight;\n\t\t\t\t\tcallbackSample=(slotLeft+slotRight)/2;"
+        LIBVGM_AB_OLD_SCSP "${LIBVGM_AB_OLD_SCSP}")
+      string(REPLACE
+        "Enc=((TL(slot))<<0x0)|((DIPAN(slot))<<0x8)|((DISDL(slot))<<0xd);\n\t\t\t\t{\n\t\t\t\t\tslotLeft="
+        "if(!debugOutputMuted)\n\t\t\t\t{\n\t\t\t\t\tEnc=((TL(slot))<<0x0)|((DIPAN(slot))<<0x8)|((DISDL(slot))<<0xd);\n\t\t\t\t\t{\n\t\t\t\t\t\tslotLeft="
+        LIBVGM_AB_OLD_SCSP "${LIBVGM_AB_OLD_SCSP}")
+      string(REPLACE
+        "callbackSample=(slotLeft+slotRight)/2;\n\t\t\t\t}"
+        "callbackSample=(slotLeft+slotRight)/2;\n\t\t\t\t\t}\n\t\t\t\t}"
+        LIBVGM_AB_OLD_SCSP "${LIBVGM_AB_OLD_SCSP}")
+      string(REPLACE
+        "#if FM_DELAY\n\t\t\tscsp->RINGBUF[(scsp->BUFPTR+64-(FM_DELAY-1))&63] = scsp->DELAYBUF[(scsp->DELAYPTR+FM_DELAY-(FM_DELAY-1))%FM_DELAY];\n#endif"
+        "if(SlotSampleCallback != NULL)\n\t\t\t\tSlotSampleCallback(SlotSampleCallbackOpaque, sl, callbackSample);\n#if FM_DELAY\n\t\t\tscsp->RINGBUF[(scsp->BUFPTR+64-(FM_DELAY-1))&63] = scsp->DELAYBUF[(scsp->DELAYPTR+FM_DELAY-(FM_DELAY-1))%FM_DELAY];\n#endif"
+        LIBVGM_AB_OLD_SCSP "${LIBVGM_AB_OLD_SCSP}")
+      file(WRITE "${LIBVGM_AB_OLD_SRC}/emu/cores/scsp.c" "${LIBVGM_AB_OLD_SCSP}")
+      file(COPY
+        "${CMAKE_CURRENT_SOURCE_DIR}/tools/libvgm_ab_worker.cpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/tools/libvgm_ab_slot_callback.h"
+        DESTINATION "${LIBVGM_AB_OLD_SRC}")
+      file(APPEND "${LIBVGM_AB_OLD_SRC}/CMakeLists.txt" "\n\
+add_executable(libvgm_ab_worker_old libvgm_ab_worker.cpp)\n\
+target_compile_features(libvgm_ab_worker_old PRIVATE cxx_std_11)\n\
+target_include_directories(libvgm_ab_worker_old PRIVATE \${PROJECT_SOURCE_DIR})\n\
+target_link_libraries(libvgm_ab_worker_old PRIVATE vgm-player vgm-emu vgm-utils)\n")
+    endif()
+
+    add_custom_command(
+      OUTPUT "${LIBVGM_AB_OLD_WORKER_PATH}"
+      COMMAND "${CMAKE_COMMAND}" -S "${LIBVGM_AB_OLD_SRC}" -B "${LIBVGM_AB_OLD_BUILD}"
+        -DBUILD_LIBAUDIO=OFF -DBUILD_LIBEMU=ON -DBUILD_LIBPLAYER=ON
+        -DBUILD_TESTS=OFF -DBUILD_PLAYER=OFF -DBUILD_VGM2WAV=OFF
+        -DUSE_SANITIZERS=OFF -DLIBRARY_TYPE=STATIC
+      COMMAND "${CMAKE_COMMAND}" --build "${LIBVGM_AB_OLD_BUILD}" --target libvgm_ab_worker_old
+      DEPENDS
+        "${LIBVGM_AB_OLD_SRC}/CMakeLists.txt"
+        "${LIBVGM_AB_OLD_SRC}/libvgm_ab_worker.cpp"
+        "${LIBVGM_AB_OLD_SRC}/libvgm_ab_slot_callback.h"
+        "${LIBVGM_AB_OLD_SRC}/emu/cores/scsp.c"
+      VERBATIM)
+    add_custom_target(libvgm_ab_worker_old_build
+      DEPENDS "${LIBVGM_AB_OLD_WORKER_PATH}")
+
+    add_executable(libvgm_ab_player tools/libvgm_ab_player.cpp)
+    target_compile_features(libvgm_ab_player PRIVATE cxx_std_11)
+    add_dependencies(libvgm_ab_player libvgm_ab_worker_new libvgm_ab_worker_old_build)
+    target_compile_definitions(libvgm_ab_player PRIVATE
+      LIBVGM_AB_NEW_WORKER="$<TARGET_FILE:libvgm_ab_worker_new>"
+      LIBVGM_AB_OLD_WORKER="${LIBVGM_AB_OLD_WORKER_PATH}")
+    if(WIN32)
+      target_link_libraries(libvgm_ab_player PRIVATE winmm)
+    elseif(APPLE)
+      target_link_libraries(libvgm_ab_player PRIVATE "-framework AudioToolbox")
+    elseif(ALSA_FOUND)
+      target_compile_definitions(libvgm_ab_player PRIVATE SSFPLAY_HAVE_ALSA=1)
+      target_include_directories(libvgm_ab_player PRIVATE ${ALSA_INCLUDE_DIRS})
+      target_link_libraries(libvgm_ab_player PRIVATE ${ALSA_LIBRARIES})
+    endif()
+    list(APPEND SSFPLAY_TOOL_TARGETS libvgm_ab_worker_new libvgm_ab_player)
+
+    add_executable(ssf_vgm_ab_player tools/ssf_vgm_ab_player.cpp)
+    target_compile_features(ssf_vgm_ab_player PRIVATE cxx_std_11)
+    ssfplay_configure_tool(ssf_vgm_ab_player)
+    add_dependencies(ssf_vgm_ab_player libvgm_ab_worker_old_build)
+    target_compile_definitions(ssf_vgm_ab_player PRIVATE
+      LIBVGM_AB_OLD_WORKER="${LIBVGM_AB_OLD_WORKER_PATH}")
+    if(WIN32)
+      target_link_libraries(ssf_vgm_ab_player PRIVATE winmm)
+    elseif(APPLE)
+      target_link_libraries(ssf_vgm_ab_player PRIVATE "-framework AudioToolbox")
+    elseif(ALSA_FOUND)
+      target_compile_definitions(ssf_vgm_ab_player PRIVATE SSFPLAY_HAVE_ALSA=1)
+      target_include_directories(ssf_vgm_ab_player PRIVATE ${ALSA_INCLUDE_DIRS})
+      target_link_libraries(ssf_vgm_ab_player PRIVATE ${ALSA_LIBRARIES})
+    endif()
+    list(APPEND SSFPLAY_TOOL_TARGETS ssf_vgm_ab_player)
+  endif()
+
   if(SSFPLAY_BUILD_PLAYER)
     add_executable(ssfplay_cli tools/ssfplay_cli.cpp)
     target_compile_features(ssfplay_cli PRIVATE cxx_std_11)
@@ -257,6 +460,11 @@ if(BUILD_TESTING)
       --length-ms 1000
       "${CMAKE_CURRENT_SOURCE_DIR}/Nights Into Dreams (EMU).zophar/25 Twin Seeds - Growing Wings.ssf"
       "${CMAKE_CURRENT_BINARY_DIR}/test.vgz")
+    add_test(NAME ssf_sample_dump_test COMMAND ssf_sample_dump
+      --capture-ms 1000
+      --max-dumps 4
+      "${CMAKE_CURRENT_SOURCE_DIR}/Nights Into Dreams (EMU).zophar/01 Spring Valley - Paternal Horn [Ecstatic].ssf"
+      "${CMAKE_CURRENT_BINARY_DIR}/sample-dump-test")
     add_executable(vgm_replay_tests tests/vgm_replay_tests.cpp)
     target_compile_features(vgm_replay_tests PRIVATE cxx_std_11)
     target_link_libraries(vgm_replay_tests PRIVATE ssfplay::ssfplay)

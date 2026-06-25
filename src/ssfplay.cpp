@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <fstream>
 #include <memory>
 #include <string>
 #include <vector>
@@ -17,11 +18,20 @@ namespace {
 struct CaptureState;
 static void capture_bus_write(uint64_t sample, uint32_t address, uint32_t value,
                               unsigned size);
+struct DspTraceState;
+static void trace_dsp_sample(const uint32* mixs, const uint16* efreg,
+                             int32 left, int32 right);
+struct SlotTraceState;
+static void trace_slot_sample(uint32 slot, int16 sample);
 }
 
 #define MDFN_SSFPLAY_COMPILE
 #define SSFPLAY_CAPTURE_WRITE(sample, address, value, size) \
   capture_bus_write(sample, address, value, size)
+#define SSFPLAY_DSP_TRACE_SAMPLE(mixs, efreg, left, right) \
+  trace_dsp_sample(mixs, efreg, left, right)
+#define SSFPLAY_SLOT_TRACE_SAMPLE(slot, sample) \
+  trace_slot_sample(slot, sample)
 #define SS_DBG(a, ...) ((void)0)
 #define CDB_GetCDDA(n) ((void)0)
 #define SS_SetPhysMemMap(...) ((void)0)
@@ -30,6 +40,8 @@ typedef int32 sscpu_timestamp_t;
 #undef SS_SetPhysMemMap
 #undef CDB_GetCDDA
 #undef SS_DBG
+#undef SSFPLAY_DSP_TRACE_SAMPLE
+#undef SSFPLAY_SLOT_TRACE_SAMPLE
 #undef SSFPLAY_CAPTURE_WRITE
 #undef MDFN_SSFPLAY_COMPILE
 
@@ -43,6 +55,52 @@ struct CaptureState {
 };
 
 static CaptureState* active_capture = nullptr;
+
+struct DspTraceState {
+  std::ofstream out;
+  uint64_t sample = 0;
+};
+
+static DspTraceState* active_dsp_trace = nullptr;
+
+struct SlotTraceState {
+  ssfplay_slot_sample_callback callback = nullptr;
+  void* opaque = nullptr;
+};
+
+static SlotTraceState* active_slot_trace = nullptr;
+
+static int32_t sign_extend_20(uint32 value) {
+  value &= 0xFFFFF;
+  return (value & 0x80000) ? static_cast<int32_t>(value | 0xFFF00000)
+                           : static_cast<int32_t>(value);
+}
+
+static void write_dsp_trace_header(std::ostream& out) {
+  out << "sample";
+  for (unsigned i = 0; i < 16; ++i) out << ",mixs" << i;
+  for (unsigned i = 0; i < 16; ++i) out << ",efreg" << i;
+  out << ",left,right\n";
+}
+
+static void trace_dsp_sample(const uint32* mixs, const uint16* efreg,
+                             int32 left, int32 right) {
+  if (!active_dsp_trace || !active_dsp_trace->out)
+    return;
+  std::ostream& out = active_dsp_trace->out;
+  out << active_dsp_trace->sample++;
+  for (unsigned i = 0; i < 16; ++i)
+    out << ',' << sign_extend_20(mixs[i]);
+  for (unsigned i = 0; i < 16; ++i)
+    out << ',' << static_cast<int16_t>(efreg[i]);
+  out << ',' << left << ',' << right << '\n';
+}
+
+static void trace_slot_sample(uint32 slot, int16 sample) {
+  if (!active_slot_trace || !active_slot_trace->callback)
+    return;
+  active_slot_trace->callback(active_slot_trace->opaque, slot, sample);
+}
 
 static void append_capture_byte(uint64_t sample, uint32_t address, uint8_t value,
                                 bool from_word_write) {
@@ -364,14 +422,24 @@ ssfplay_capture_stats ssfplay_capture_get_stats(const ssfplay_decoder* d) {
   return d ? d->capture.stats : ssfplay_capture_stats{};
 }
 
-ssfplay_result ssfplay_capture_replay(const uint8_t* ram, size_t ram_size,
-                                      const ssfplay_capture_event* events,
-                                      size_t event_count, uint64_t sample_count,
-                                      int16_t* output) {
+static ssfplay_result replay_internal(
+    const uint8_t* ram, size_t ram_size, const ssfplay_capture_event* events,
+    size_t event_count, uint64_t sample_count, const char* trace_csv_path,
+    SlotTraceState* slot_trace,
+    int16_t* output) {
   if (!ram || ram_size > 0x80000 || (!events && event_count) ||
       (!output && sample_count))
     return SSFPLAY_ERROR_INVALID_ARGUMENT;
   try {
+    DspTraceState trace;
+    if (trace_csv_path && trace_csv_path[0]) {
+      trace.out.open(trace_csv_path, std::ios::binary);
+      if (!trace.out)
+        return SSFPLAY_ERROR_IO;
+      write_dsp_trace_header(trace.out);
+      active_dsp_trace = &trace;
+    }
+    active_slot_trace = slot_trace;
     if (active_capture) active_capture->enabled = false;
     active_capture = nullptr;
     MDFN_IEN_SSFPLAY::SOUND_Kill();
@@ -399,14 +467,49 @@ ssfplay_result ssfplay_capture_replay(const uint8_t* ram, size_t ram_size,
         const int32 count = MDFN_IEN_SSFPLAY::SOUND_FlushOutput(
             output + (produced - buffered) * 2, static_cast<int32>(buffered),
             false);
-        if (count != static_cast<int32>(buffered))
+        if (count != static_cast<int32>(buffered)) {
+          active_dsp_trace = nullptr;
+          active_slot_trace = nullptr;
           return SSFPLAY_ERROR_INTERNAL;
+        }
       }
     }
+    active_dsp_trace = nullptr;
+    active_slot_trace = nullptr;
     return SSFPLAY_OK;
   } catch (...) {
+    active_dsp_trace = nullptr;
+    active_slot_trace = nullptr;
     return SSFPLAY_ERROR_INTERNAL;
   }
+}
+
+ssfplay_result ssfplay_capture_replay(const uint8_t* ram, size_t ram_size,
+                                      const ssfplay_capture_event* events,
+                                      size_t event_count, uint64_t sample_count,
+                                      int16_t* output) {
+  return replay_internal(ram, ram_size, events, event_count, sample_count,
+                         nullptr, nullptr, output);
+}
+
+ssfplay_result ssfplay_capture_replay_dsp_trace(
+    const uint8_t* ram, size_t ram_size, const ssfplay_capture_event* events,
+    size_t event_count, uint64_t sample_count, const char* trace_csv_path,
+    int16_t* output) {
+  return replay_internal(ram, ram_size, events, event_count, sample_count,
+                         trace_csv_path, nullptr, output);
+}
+
+ssfplay_result ssfplay_capture_replay_slot_trace(
+    const uint8_t* ram, size_t ram_size, const ssfplay_capture_event* events,
+    size_t event_count, uint64_t sample_count,
+    ssfplay_slot_sample_callback slot_callback, void* slot_callback_opaque,
+    int16_t* output) {
+  SlotTraceState trace;
+  trace.callback = slot_callback;
+  trace.opaque = slot_callback_opaque;
+  return replay_internal(ram, ram_size, events, event_count, sample_count,
+                         nullptr, slot_callback ? &trace : nullptr, output);
 }
 
 }

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build a vgmrips-style NiGHTS Into Dreams VGM/VGZ pack from SSF files."""
+"""Build a vgmrips-style VGM/VGZ pack from a directory of SSF files."""
 
 from __future__ import annotations
 
@@ -10,24 +10,42 @@ import re
 import shutil
 import subprocess
 import zipfile
+from collections import Counter
+from datetime import date
 from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_INPUT = ROOT / "Nights Into Dreams (EMU).zophar"
-DEFAULT_OUTPUT = ROOT / "NiGHTS Into Dreams"
-PACK_TITLE = "NiGHTS Into Dreams..."
-PACK_DIR_NAME = "NiGHTS Into Dreams"
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Convert the local NiGHTS SSF rip to a vgmrips-style VGZ pack."
+        description="Convert an SSF rip directory to a vgmrips-style VGZ pack."
     )
-    parser.add_argument("--input", type=Path, default=DEFAULT_INPUT,
+    parser.add_argument("input_dir", nargs="?", type=Path,
                         help="SSF rip directory")
-    parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT,
+    parser.add_argument("--input", dest="input_opt", type=Path, default=None,
+                        help="SSF rip directory; alternative to positional input_dir")
+    parser.add_argument("--output", type=Path, default=None,
                         help="Output pack directory")
+    parser.add_argument("--pack-title", default=None,
+                        help="Game/pack title; defaults to SSF game tag or input directory name")
+    parser.add_argument("--pack-dir-name", default=None,
+                        help="Base name for .m3u/.txt/image files; defaults to output directory name")
+    parser.add_argument("--system", default="Sega Saturn",
+                        help="System name for the txt metadata")
+    parser.add_argument("--hardware", default="SCSP",
+                        help="Music hardware for the txt metadata")
+    parser.add_argument("--artist", action="append", default=None,
+                        help="Music author line; may be passed multiple times")
+    parser.add_argument("--developer", default=None,
+                        help="Game developer metadata")
+    parser.add_argument("--publisher", default=None,
+                        help="Game publisher metadata")
+    parser.add_argument("--release-date", default=None,
+                        help="Game release date metadata")
+    parser.add_argument("--notes", action="append", default=[],
+                        help="Extra note paragraph; may be passed multiple times")
     parser.add_argument("--ssf2vgm", type=Path, default=None,
                         help="Path to ssf2vgm; auto-detected by default")
     parser.add_argument("--vgm-cmp", default=None,
@@ -36,6 +54,8 @@ def parse_args() -> argparse.Namespace:
                         help="Package creator name for the txt metadata")
     parser.add_argument("--package-version", default="1.00",
                         help="Package version for the txt metadata")
+    parser.add_argument("--package-date", default=os.environ.get("SSFPLAY_PACK_DATE", date.today().isoformat()),
+                        help="Package history date")
     parser.add_argument("--length-ms", type=int, default=None,
                         help="Override every track length, useful for quick test packs")
     parser.add_argument("--keep-vgm", action="store_true",
@@ -45,6 +65,25 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--zip", action="store_true",
                         help="Also write a zip archive next to the output directory")
     return parser.parse_args()
+
+
+def strip_rip_suffix(name: str) -> str:
+    name = re.sub(r"\s*\(EMU\)\.zophar$", "", name, flags=re.IGNORECASE)
+    name = re.sub(r"\.zophar$", "", name, flags=re.IGNORECASE)
+    return name.strip() or "SSF Pack"
+
+
+def most_common_tag(all_tags: list[dict[str, str]], key: str, fallback: str = "") -> str:
+    values = [tags.get(key, "").strip() for tags in all_tags if tags.get(key, "").strip()]
+    if not values:
+        return fallback
+    return Counter(values).most_common(1)[0][0]
+
+
+def split_people(value: str) -> list[str]:
+    if not value:
+        return []
+    return [part.strip() for part in re.split(r"\s*,\s*", value) if part.strip()]
 
 
 def find_tool(explicit: Path | None, names: list[str]) -> str:
@@ -151,7 +190,11 @@ def safe_filename(name: str) -> str:
 
 
 def find_logo(input_dir: Path) -> Path | None:
-    preferred = ["logo.png", "logo.jpg", "logo.jpeg", "cover.png", "cover.jpg", "cover.jpeg"]
+    preferred = [
+        "logo.png", "logo.jpg", "logo.jpeg",
+        "cover.png", "cover.jpg", "cover.jpeg",
+        "front.png", "front.jpg", "front.jpeg",
+    ]
     lower_map = {p.name.lower(): p for p in input_dir.iterdir() if p.is_file()}
     for name in preferred:
         if name in lower_map:
@@ -177,33 +220,43 @@ def gzip_file(src: Path, dst: Path) -> None:
             shutil.copyfileobj(fin, fout)
 
 
-def write_m3u(pack_dir: Path, tracks: list[dict[str, object]]) -> None:
-    m3u = pack_dir / f"{PACK_DIR_NAME}.m3u"
+def write_m3u(pack_dir: Path, pack_dir_name: str, tracks: list[dict[str, object]]) -> None:
+    m3u = pack_dir / f"{pack_dir_name}.m3u"
     with m3u.open("w", encoding="utf-8", newline="\r\n") as out:
         for track in tracks:
             out.write(f"{track['vgz_name']}\n")
 
 
-def write_txt(pack_dir: Path, tracks: list[dict[str, object]],
-              creator: str, package_version: str) -> None:
+def write_multiline_field(out, label: str, values: list[str]) -> None:
+    if not values:
+        return
+    out.write(f"{label:<21}{values[0]}\n")
+    for value in values[1:]:
+        out.write(f"{'':21}{value}\n")
+
+
+def write_txt(pack_dir: Path, pack_dir_name: str, pack_title: str,
+              tracks: list[dict[str, object]], metadata: dict[str, object]) -> None:
     total_ms = sum(int(track["length_ms"]) for track in tracks)
-    txt = pack_dir / f"{PACK_DIR_NAME}.txt"
+    txt = pack_dir / f"{pack_dir_name}.txt"
     with txt.open("w", encoding="utf-8", newline="\r\n") as out:
         out.write("***********************************************\n")
         out.write("* VGM music package                           *\n")
         out.write("* http://vgmrips.net/                         *\n")
         out.write("***********************************************\n")
-        out.write(f"Game name:           {PACK_TITLE}\n")
-        out.write("System:              Sega Saturn\n")
-        out.write("Music hardware:      SCSP\n\n")
-        out.write("Music author:        Tomoko Sasaki,\n")
-        out.write("                     Naofumi Hataya,\n")
-        out.write("                     Fumie Kumatani\n")
-        out.write("Game developer:      Sonic Team\n")
-        out.write("Game publisher:      Sega\n")
-        out.write("Game release date:   1996-07-05\n\n")
-        out.write(f"Package created by:  {creator}\n")
-        out.write(f"Package version:     {package_version}\n\n")
+        out.write(f"Game name:           {pack_title}\n")
+        out.write(f"System:              {metadata['system']}\n")
+        out.write(f"Music hardware:      {metadata['hardware']}\n\n")
+        write_multiline_field(out, "Music author:", list(metadata["artists"]))
+        if metadata.get("developer"):
+            out.write(f"Game developer:      {metadata['developer']}\n")
+        if metadata.get("publisher"):
+            out.write(f"Game publisher:      {metadata['publisher']}\n")
+        if metadata.get("release_date"):
+            out.write(f"Game release date:   {metadata['release_date']}\n")
+        out.write("\n")
+        out.write(f"Package created by:  {metadata['creator']}\n")
+        out.write(f"Package version:     {metadata['package_version']}\n\n")
         out.write("Song list, in approximate game order:\n")
         out.write("Song name                                              Length:\n")
         out.write("                                                       Total  Loop\n")
@@ -216,10 +269,16 @@ def write_txt(pack_dir: Path, tracks: list[dict[str, object]],
         out.write("This pack was generated from the supplied SSF rip using ssf2vgm's\n")
         out.write("native Sega Saturn SCSP capture path. Each track was converted to VGM,\n")
         out.write("processed with vgm_cmp, and gzip-compressed to VGZ.\n\n")
-        out.write("The SSF set primarily exposes music entries. It does not include every\n")
-        out.write("gameplay sound effect or disc-loaded asset from the original game.\n\n\n")
-        out.write("Package history:\n")
-        out.write(f"{package_version} {os.environ.get('SSFPLAY_PACK_DATE', '2026-06-16')} {creator}: Initial ssf2vgm pack.\n")
+        out.write("SSF sets primarily expose ripped music entries. They do not necessarily\n")
+        out.write("include every gameplay sound effect or disc-loaded asset from the original game.\n")
+        for note in metadata["notes"]:
+            out.write("\n")
+            out.write(str(note).strip() + "\n")
+        out.write("\n\nPackage history:\n")
+        out.write(
+            f"{metadata['package_version']} {metadata['package_date']} "
+            f"{metadata['creator']}: Initial ssf2vgm pack.\n"
+        )
 
 
 def zip_pack(pack_dir: Path) -> Path:
@@ -234,18 +293,40 @@ def zip_pack(pack_dir: Path) -> Path:
 
 def main() -> int:
     args = parse_args()
-    input_dir = args.input.resolve()
-    output_dir = args.output.resolve()
+    input_arg = args.input_opt or args.input_dir
+    if input_arg is None:
+        raise SystemExit("input directory required; pass an SSF rip directory or --input DIR")
+    input_dir = input_arg.resolve()
     if not input_dir.is_dir():
         raise SystemExit(f"input directory not found: {input_dir}")
 
-    ssf2vgm = find_tool(args.ssf2vgm, ["ssf2vgm", "ssf2vgm.exe"])
-    vgm_cmp = find_tool(Path(args.vgm_cmp) if args.vgm_cmp else None,
-                        ["vgm_cmp", "vgm_cmp.exe"])
+    default_title = strip_rip_suffix(input_dir.name)
+    output_dir = (args.output or (ROOT / default_title)).resolve()
+    pack_dir_name = args.pack_dir_name or output_dir.name
 
     ssf_files = sorted(input_dir.glob("*.ssf"), key=sort_key)
     if not ssf_files:
         raise SystemExit(f"no .ssf files found in {input_dir}")
+    all_tags = [read_tags(ssf) for ssf in ssf_files]
+
+    pack_title = args.pack_title or most_common_tag(all_tags, "game", default_title)
+    artist_values = args.artist or split_people(most_common_tag(all_tags, "artist"))
+    metadata = {
+        "system": args.system,
+        "hardware": args.hardware,
+        "artists": artist_values,
+        "developer": args.developer,
+        "publisher": args.publisher,
+        "release_date": args.release_date or most_common_tag(all_tags, "year"),
+        "creator": args.creator,
+        "package_version": args.package_version,
+        "package_date": args.package_date,
+        "notes": args.notes,
+    }
+
+    ssf2vgm = find_tool(args.ssf2vgm, ["ssf2vgm", "ssf2vgm.exe"])
+    vgm_cmp = find_tool(Path(args.vgm_cmp) if args.vgm_cmp else None,
+                        ["vgm_cmp", "vgm_cmp.exe"])
 
     if output_dir.exists():
         if not args.force:
@@ -257,11 +338,11 @@ def main() -> int:
 
     logo = find_logo(input_dir)
     if logo:
-        shutil.copy2(logo, output_dir / f"{PACK_DIR_NAME}{logo.suffix.lower()}")
+        shutil.copy2(logo, output_dir / f"{pack_dir_name}{logo.suffix.lower()}")
 
     tracks: list[dict[str, object]] = []
     for index, ssf in enumerate(ssf_files, 1):
-        tags = read_tags(ssf)
+        tags = all_tags[index - 1]
         title = tags.get("title") or ssf.stem
         prefix_match = re.match(r"^(\d+)", ssf.stem)
         prefix = prefix_match.group(1) if prefix_match else f"{index:02d}"
@@ -287,8 +368,8 @@ def main() -> int:
         })
         print(f"wrote {final_vgz.name} ({format_time(length_ms)})", flush=True)
 
-    write_m3u(output_dir, tracks)
-    write_txt(output_dir, tracks, args.creator, args.package_version)
+    write_m3u(output_dir, pack_dir_name, tracks)
+    write_txt(output_dir, pack_dir_name, pack_title, tracks, metadata)
 
     if not args.keep_vgm:
         shutil.rmtree(work_dir)

@@ -15,8 +15,8 @@ cmake --build build --target ssfplay_all_tools
 ctest --test-dir build --output-on-failure
 ```
 
-The default build uses a static `ssfplay` core and creates three standalone
-tools: `ssfplay_cli`, `ssf2wav`, and `ssf2vgm`. Set
+The default build uses a static `ssfplay` core and creates four standalone
+tools: `ssfplay_cli`, `ssf2wav`, `ssf2vgm`, and `ssf_sample_dump`. Set
 `-DSSFPLAY_BUILD_SHARED=ON` only when you also want an embeddable shared
 library. Set `-DSSFPLAY_BUILD_CLI=OFF` when only the library is needed.
 
@@ -77,15 +77,52 @@ The automated all-track smoke test intentionally writes one-second files named
 artifacts, not completed track conversions. Run `ssf2vgm` without
 `--length-ms` to use each SSF's tagged duration.
 
-## Build The NiGHTS Pack
-
-The helper script below creates a vgmrips-style local pack from the supplied
-NiGHTS SSF directory. It converts each `.ssf` to `.vgm`, runs `vgm_cmp`, gzip
-compresses the result to `.vgz`, copies the logo image, and writes a matching
-`.m3u` and `.txt`.
+## Dump Referenced SCSP Samples
 
 ```sh
-scripts/make_nights_vgmrips_pack.py --force --zip
+build/ssf_sample_dump --capture-ms 8000 input.ssf sample-dump-dir
+build/ssf_sample_dump --pre-ms 1000 --post-ms 1500 input.ssf sample-dump-dir
+```
+
+`ssf_sample_dump` runs the SSF briefly, watches which SCSP slots are configured
+for external PCM, and writes each unique referenced sample as a mono WAV plus a
+`manifest.csv`. The manifest includes RAM address, PCM8/PCM16 format, loop
+points, slot mask, first trigger time, pitch, mix registers, RMS, and peak
+level. This is an audition/debugging tool for finding instruments that are
+actually triggered by the ripped sequence; it does not infer dormant samples
+whose driver trigger is unknown. Dumped WAVs include 500 ms of silence before
+and after the raw sample by default so short instruments are easier to play in
+ordinary audio players; use `--pre-ms` and `--post-ms` to change that.
+
+## Dump Ymir SCSP Slots
+
+For a cleaner per-channel view, the optional Ymir-based tool replays an
+`ssf2vgm` SCSP capture through Ymir's SCSP core and writes each native slot as
+a separate mono WAV:
+
+```sh
+cmake -S Ymir/tools/scsp-slot-dump -B build-ymir-slot-dump -DCMAKE_BUILD_TYPE=Release
+cmake --build build-ymir-slot-dump --target ymir-scsp-slot-dump
+build-ymir-slot-dump/ymir-scsp-slot-dump --skip-silent input.vgz slot-dump-dir
+build-ymir-slot-dump/ymir-scsp-slot-dump --limit-ms 1000 input.vgm slot-dump-dir
+```
+
+The output directory contains `slot_00.wav` through `slot_31.wav`,
+`final_mix.wav`, and `manifest.csv` with frame count, nonzero sample count,
+peak, RMS, and key-on count per slot. This is intended for comparing where a
+sound disappears: slot generation, direct mix, DSP return, panning, or player
+emulation. The tool lives under the local `Ymir` checkout and requires Ymir's
+submodules to be initialized.
+
+## Build A VGMRips-Style Pack
+
+The helper script below creates a vgmrips-style local pack from an SSF rip
+directory. It converts each `.ssf` to `.vgm`, runs `vgm_cmp`, gzip-compresses
+the result to `.vgz`, copies the logo image, and writes a matching `.m3u` and
+`.txt`.
+
+```sh
+scripts/make_vgmrips_pack.py "Nights Into Dreams (EMU).zophar" --force --zip
 ```
 
 Use `--length-ms 1000 --output /tmp/nights-pack-test` for a quick smoke pack.
@@ -136,5 +173,5 @@ cmake --build build-fb2k --target foo_ssfplay
 ```
 
 GitHub Actions builds native tool packages for Windows, Linux, macOS Intel, and
-WASM artifacts. The native packages contain only `ssfplay_cli`, `ssf2wav`,
-`ssf2vgm`, and license/docs.
+WASM artifacts. The native packages contain the command-line tools and
+license/docs.

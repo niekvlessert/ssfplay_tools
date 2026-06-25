@@ -1449,7 +1449,19 @@ INLINE void SS_SCSP::RunSample(T_out* outlr, void (*midi_out)(uint8))
  //
  //
  //
+#ifdef SSFPLAY_DSP_TRACE_SAMPLE
+ uint32 ssfplay_dsp_trace_mixs[0x10];
+ uint16 ssfplay_dsp_trace_efreg[0x10];
+ for(unsigned i = 0; i < 0x10; i++)
+  ssfplay_dsp_trace_mixs[i] = DSP.MIXS[i];
+#endif
+
  RunDSP();
+
+#ifdef SSFPLAY_DSP_TRACE_SAMPLE
+ for(unsigned i = 0; i < 0x10; i++)
+  ssfplay_dsp_trace_efreg[i] = DSP.EFREG[i];
+#endif
 
  for(unsigned i = 0; i < 0x10; i++)
   DSP.MIXS[i] = 0;
@@ -1644,6 +1656,10 @@ INLINE void SS_SCSP::RunSample(T_out* outlr, void (*midi_out)(uint8))
    }
   }
 
+#ifdef SSFPLAY_SLOT_TRACE_SAMPLE
+  SSFPLAY_SLOT_TRACE_SAMPLE(slot, static_cast<int16>(sample));
+#endif
+
   if(!Slots[(GlobalCounter - 4) & 0x1F].StackWriteInhibit)
   {
    SoundStack[(GlobalCounter - 4) & 0x3F] = SoundStackDelayer[3];
@@ -1697,6 +1713,10 @@ INLINE void SS_SCSP::RunSample(T_out* outlr, void (*midi_out)(uint8))
 
  outlr[0] = out_accum[0];
  outlr[1] = out_accum[1];
+
+#ifdef SSFPLAY_DSP_TRACE_SAMPLE
+ SSFPLAY_DSP_TRACE_SAMPLE(ssfplay_dsp_trace_mixs, ssfplay_dsp_trace_efreg, out_accum[0], out_accum[1]);
+#endif
 }
 
 //
@@ -1921,4 +1941,3 @@ void SS_SCSP::SetRegister(const unsigned id, const uint32 value)
 	break;
  }
 }
-

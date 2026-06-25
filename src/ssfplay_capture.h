@@ -40,6 +40,9 @@ typedef struct ssfplay_capture_stats {
   uint64_t ram_writes;
 } ssfplay_capture_stats;
 
+typedef void (*ssfplay_slot_sample_callback)(void* opaque, uint32_t slot,
+                                             int16_t sample);
+
 SSFPLAY_PRIVATE_API ssfplay_result ssfplay_capture_begin(ssfplay_decoder* decoder);
 SSFPLAY_PRIVATE_API void ssfplay_capture_end(ssfplay_decoder* decoder);
 SSFPLAY_PRIVATE_API const uint8_t* ssfplay_capture_initial_ram(
@@ -52,6 +55,16 @@ SSFPLAY_PRIVATE_API ssfplay_result ssfplay_capture_replay(
     const uint8_t* initial_ram, size_t ram_size,
     const ssfplay_capture_event* events, size_t event_count,
     uint64_t sample_count, int16_t* interleaved_stereo);
+SSFPLAY_PRIVATE_API ssfplay_result ssfplay_capture_replay_dsp_trace(
+    const uint8_t* initial_ram, size_t ram_size,
+    const ssfplay_capture_event* events, size_t event_count,
+    uint64_t sample_count, const char* trace_csv_path,
+    int16_t* interleaved_stereo);
+SSFPLAY_PRIVATE_API ssfplay_result ssfplay_capture_replay_slot_trace(
+    const uint8_t* initial_ram, size_t ram_size,
+    const ssfplay_capture_event* events, size_t event_count,
+    uint64_t sample_count, ssfplay_slot_sample_callback slot_callback,
+    void* slot_callback_opaque, int16_t* interleaved_stereo);
 
 #ifdef __cplusplus
 }

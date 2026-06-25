@@ -39,11 +39,15 @@ struct Report {
   uint32_t configured_read_min = 0xFFFFFFFF;
   uint32_t configured_read_max = 0;
   uint64_t emitted_register_writes = 0;
+  uint64_t emitted_initial_ram_blocks = 0;
+  uint64_t emitted_initial_ram_bytes = 0;
   uint64_t emitted_ram_blocks = 0;
   uint64_t emitted_ram_bytes = 0;
   uint64_t skipped_register_noops = 0;
   uint64_t skipped_ram_noops = 0;
   uint64_t skipped_unread_ram_writes = 0;
+  uint64_t folded_key_execute_writes = 0;
+  uint64_t emitted_key_execute_pulses = 0;
 };
 
 static void put_u16(std::vector<uint8_t>& out, uint16_t value) {
@@ -56,6 +60,16 @@ static void put_u32(std::vector<uint8_t>& out, uint32_t value) {
   out.push_back(static_cast<uint8_t>(value >> 8));
   out.push_back(static_cast<uint8_t>(value >> 16));
   out.push_back(static_cast<uint8_t>(value >> 24));
+}
+
+static void emit_scsp_ram_block(std::vector<uint8_t>& out, uint32_t address,
+                                const uint8_t* data, size_t size) {
+  out.push_back(0x67);
+  out.push_back(0x66);
+  out.push_back(0xE0);
+  put_u32(out, static_cast<uint32_t>(size + 4));
+  put_u32(out, address);
+  out.insert(out.end(), data, data + size);
 }
 
 static void set_u32(std::vector<uint8_t>& out, size_t offset, uint32_t value) {
@@ -84,6 +98,14 @@ static void emit_wait(std::vector<uint8_t>& out, uint64_t samples) {
     put_u16(out, chunk);
     samples -= chunk;
   }
+}
+
+static void emit_scsp_register_write(std::vector<uint8_t>& out,
+                                     uint32_t address, uint8_t value) {
+  out.push_back(0xC5);
+  out.push_back(static_cast<uint8_t>(address >> 8));
+  out.push_back(static_cast<uint8_t>(address));
+  out.push_back(value);
 }
 
 static void append_utf16(std::vector<uint8_t>& out, const char* text) {
@@ -186,7 +208,8 @@ static bool in_ranges(const std::vector<Range>& ranges, uint32_t address) {
 
 static void collect_sound_ram_ranges_from_shadow(const uint8_t* shadow,
                                                  std::vector<Range>& ranges,
-                                                 Report& report) {
+                                                 Report& report,
+                                                 bool dsp_ring_configured) {
   bool any_dsp_routing = false;
   for (unsigned slot = 0; slot < 32; ++slot) {
     const unsigned base = slot * 0x20;
@@ -212,7 +235,7 @@ static void collect_sound_ram_ranges_from_shadow(const uint8_t* shadow,
   for (unsigned i = 0x700; i < 0xC00; ++i) {
     any_dsp_program |= shadow[i] != 0;
   }
-  if (any_dsp_program || any_dsp_routing) {
+  if ((any_dsp_program || any_dsp_routing) && dsp_ring_configured) {
     const uint16_t rb = shadow_word(shadow, 0x402);
     const uint32_t rbp = rb & 0x7F;
     const uint32_t rbl = (rb >> 7) & 0x3;
@@ -226,11 +249,15 @@ static std::vector<Range> collect_sound_ram_ranges(
     const ssfplay_capture_event* events, size_t event_count, Report& report) {
   std::vector<Range> ranges;
   uint8_t shadow[0x1000] = {};
+  bool dsp_ring_configured = false;
   for (size_t i = 0; i < event_count; ++i) {
     if (events[i].type != SSFPLAY_CAPTURE_REGISTER_WRITE)
       continue;
     shadow[events[i].address & 0xFFF] = events[i].value;
-    collect_sound_ram_ranges_from_shadow(shadow, ranges, report);
+    if ((events[i].address & 0xFFF) == 0x403)
+      dsp_ring_configured = true;
+    collect_sound_ram_ranges_from_shadow(shadow, ranges, report,
+                                         dsp_ring_configured);
   }
   return ranges;
 }
@@ -329,11 +356,15 @@ static void write_report(const std::string& path, const ssfplay_decoder* decoder
       << "    \"register_bytes\": " << stats.register_writes << ",\n"
       << "    \"ram_bytes\": " << stats.ram_writes << ",\n"
       << "    \"emitted_register_writes\": " << report.emitted_register_writes << ",\n"
+      << "    \"emitted_initial_ram_blocks\": " << report.emitted_initial_ram_blocks << ",\n"
+      << "    \"emitted_initial_ram_bytes\": " << report.emitted_initial_ram_bytes << ",\n"
       << "    \"emitted_ram_blocks\": " << report.emitted_ram_blocks << ",\n"
       << "    \"emitted_ram_bytes\": " << report.emitted_ram_bytes << ",\n"
       << "    \"skipped_register_noops\": " << report.skipped_register_noops << ",\n"
       << "    \"skipped_ram_noops\": " << report.skipped_ram_noops << ",\n"
-      << "    \"skipped_unread_ram_writes\": " << report.skipped_unread_ram_writes << "\n"
+      << "    \"skipped_unread_ram_writes\": " << report.skipped_unread_ram_writes << ",\n"
+      << "    \"folded_key_execute_writes\": " << report.folded_key_execute_writes << ",\n"
+      << "    \"emitted_key_execute_pulses\": " << report.emitted_key_execute_pulses << "\n"
       << "  },\n"
       << "  \"compact_vgm_replay_comparison\": {\"different_samples\": "
       << waveform_differences << ", \"maximum_pcm_delta\": " << maximum_delta
@@ -380,20 +411,50 @@ static bool write_vgm(const std::string& path, const ssfplay_decoder* decoder,
   set_u32(out, 0x34, 0xCC);
   set_u32(out, 0xB8, 22579200);
 
-  out.push_back(0x67);
-  out.push_back(0x66);
-  out.push_back(0xE0);
-  put_u32(out, static_cast<uint32_t>(ram_size + 4));
-  put_u32(out, 0);
-  out.insert(out.end(), ram, ram + ram_size);
-
   const std::vector<Range> sound_ram_ranges =
       all_ram_writes ? std::vector<Range>()
                      : collect_sound_ram_ranges(events, event_count, report);
+  if (all_ram_writes || sound_ram_ranges.empty()) {
+    emit_scsp_ram_block(out, 0, ram, ram_size);
+    report.emitted_initial_ram_blocks++;
+    report.emitted_initial_ram_bytes += ram_size;
+  } else {
+    for (const Range& range : sound_ram_ranges) {
+      if (range.start >= ram_size)
+        continue;
+      const uint32_t end = std::min<uint32_t>(
+          range.end, static_cast<uint32_t>(ram_size - 1));
+      const size_t size = end - range.start + 1;
+      emit_scsp_ram_block(out, range.start, ram + range.start, size);
+      report.emitted_initial_ram_blocks++;
+      report.emitted_initial_ram_bytes += size;
+    }
+  }
 
   uint8_t shadow[0x1000] = {};
   std::vector<uint8_t> ram_shadow(ram, ram + ram_size);
   uint64_t position = 0;
+  bool pending_key_execute = false;
+  uint32_t pending_key_execute_address = 0;
+  auto flush_key_execute = [&]() {
+    if (!pending_key_execute)
+      return;
+    const uint32_t reg = pending_key_execute_address & 0xFFF;
+    const uint8_t value = static_cast<uint8_t>(shadow[reg] | 0x10);
+    emit_scsp_register_write(out, pending_key_execute_address, value);
+    report.emitted_register_writes++;
+    report.emitted_key_execute_pulses++;
+    if (emitted_events) {
+      ssfplay_capture_event event = {};
+      event.sample = position;
+      event.type = SSFPLAY_CAPTURE_REGISTER_WRITE;
+      event.address = pending_key_execute_address;
+      event.value = value;
+      emitted_events->push_back(event);
+    }
+    inspect_shadow(shadow, report);
+    pending_key_execute = false;
+  };
   for (size_t i = 0; i < event_count;) {
     if (events[i].sample > total_samples) break;
     if (events[i].type == SSFPLAY_CAPTURE_RAM_WRITE &&
@@ -416,6 +477,8 @@ static bool write_vgm(const std::string& path, const ssfplay_decoder* decoder,
       ++i;
       continue;
     }
+    if (pending_key_execute && events[i].sample != position)
+      flush_key_execute();
     emit_wait(out, events[i].sample - position);
     position = events[i].sample;
     if (events[i].type == SSFPLAY_CAPTURE_RAM_WRITE) {
@@ -448,20 +511,41 @@ static bool write_vgm(const std::string& path, const ssfplay_decoder* decoder,
                                       events[end - 1].address);
       i = end;
     } else {
-      out.push_back(0xC5);
-      out.push_back(static_cast<uint8_t>(events[i].address >> 8));
-      out.push_back(static_cast<uint8_t>(events[i].address));
-      out.push_back(events[i].value);
-      shadow[events[i].address & 0xFFF] = events[i].value;
-      report.emitted_register_writes++;
-      if (emitted_events)
-        emitted_events->push_back(events[i]);
-      if (events[i].address >= 0x700 && events[i].address < 0xC00)
-        report.dsp_program = true;
-      inspect_shadow(shadow, report);
+      const uint32_t reg = events[i].address & 0xFFF;
+      if (reg < 0x400 && (reg & 0x1F) == 0x00 &&
+          (events[i].value & 0x10)) {
+        const uint8_t value_without_key_execute =
+            static_cast<uint8_t>(events[i].value & ~0x10);
+        if (shadow[reg] != value_without_key_execute) {
+          emit_scsp_register_write(out, events[i].address,
+                                   value_without_key_execute);
+          shadow[reg] = value_without_key_execute;
+          report.emitted_register_writes++;
+          if (emitted_events) {
+            ssfplay_capture_event event = events[i];
+            event.value = value_without_key_execute;
+            emitted_events->push_back(event);
+          }
+          inspect_shadow(shadow, report);
+        } else {
+          report.folded_key_execute_writes++;
+        }
+        pending_key_execute = true;
+        pending_key_execute_address = events[i].address;
+      } else {
+        emit_scsp_register_write(out, events[i].address, events[i].value);
+        shadow[reg] = events[i].value;
+        report.emitted_register_writes++;
+        if (emitted_events)
+          emitted_events->push_back(events[i]);
+        if (events[i].address >= 0x700 && events[i].address < 0xC00)
+          report.dsp_program = true;
+        inspect_shadow(shadow, report);
+      }
       ++i;
     }
   }
+  flush_key_execute();
   emit_wait(out, total_samples - position);
   out.push_back(0x66);
 
