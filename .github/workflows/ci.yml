@@ -153,6 +153,8 @@ jobs:
         run: >
           emcmake cmake -S . -B build-wasm
           -DCMAKE_BUILD_TYPE=Release
+          -DCMAKE_C_FLAGS_RELEASE="-O3 -DNDEBUG"
+          -DCMAKE_CXX_FLAGS_RELEASE="-O3 -DNDEBUG"
           -DSSFPLAY_BUILD_SHARED=OFF
           -DSSFPLAY_BUILD_CLI=OFF
           -DSSFPLAY_BUILD_WASM=ON
