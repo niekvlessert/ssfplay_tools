@@ -531,3 +531,8 @@ set(CPACK_ARCHIVE_COMPONENT_INSTALL ON)
 set(CPACK_COMPONENTS_ALL tools)
 set(CPACK_COMPONENT_TOOLS_DISPLAY_NAME "ssfplay command-line tools")
 include(CPack)
+
+set_source_files_properties(
+  mednafen/src/hw_cpu/m68k/m68k.cpp
+  PROPERTIES COMPILE_OPTIONS "$<$<BOOL:${EMSCRIPTEN}>:-O1;-fno-jump-tables>;$<$<NOT:$<BOOL:${EMSCRIPTEN}>>:-O1>"
+)
